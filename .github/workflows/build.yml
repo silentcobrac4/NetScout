@@ -8,6 +8,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Unzip project
+        run: |
+          ZIP=$(find . -maxdepth 2 -iname "*.zip" | head -1)
+          echo "Found zip: $ZIP"
+          mkdir -p /tmp/proj
+          unzip -q -o "$ZIP" -d /tmp/proj
+          ls /tmp/proj
+      - name: Find project folder
+        id: p
+        run: echo "dir=$(dirname "$(find /tmp/proj -name settings.gradle.kts | head -1)")" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -16,8 +26,9 @@ jobs:
         with:
           gradle-version: "8.9"
       - name: Build debug APK
-        run: gradle assembleDebug --stacktrace
+        working-directory: ${{ steps.p.outputs.dir }}
+        run: gradle assembleDebug --console=plain
       - uses: actions/upload-artifact@v4
         with:
           name: NetScout-apk
-          path: app/build/outputs/apk/debug/*.apk
+          path: ${{ steps.p.outputs.dir }}/app/build/outputs/apk/debug/*.apk
