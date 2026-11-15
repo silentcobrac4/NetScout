@@ -2,7 +2,10 @@ name: Build APK
 on:
   push:
     branches: [main, master]
+    tags: ["v*"]
   workflow_dispatch:
+permissions:
+  contents: write
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -14,10 +17,46 @@ jobs:
           echo "Found zip: $ZIP"
           mkdir -p /tmp/proj
           unzip -q -o "$ZIP" -d /tmp/proj
-          ls /tmp/proj
       - name: Find project folder
         id: p
         run: echo "dir=$(dirname "$(find /tmp/proj -name settings.gradle.kts | head -1)")" >> "$GITHUB_OUTPUT"
+      - name: Download full IEEE MAC vendor list
+        continue-on-error: true
+        working-directory: ${{ steps.p.outputs.dir }}
+        run: |
+          curl -fsSL --retry 3 -A "Mozilla/5.0" https://standards-oui.ieee.org/oui/oui.csv -o /tmp/oui.csv
+          python3 - <<'PY'
+          import csv, shutil
+          rows = 0
+          with open('/tmp/oui.csv', newline='', encoding='utf-8', errors='replace') as f, open('/tmp/oui.txt', 'w', encoding='utf-8') as o:
+              for r in csv.reader(f):
+                  if len(r) >= 3 and len(r[1]) == 6:
+                      o.write(r[1].upper() + '\t' + r[2].strip().replace('\t', ' ') + '\n')
+                      rows += 1
+          print('OUI entries:', rows)
+          if rows > 1000:
+              shutil.copyfile('/tmp/oui.txt', 'app/src/main/assets/oui.txt')
+          PY
+      - name: Set version from tag
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then echo "APP_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"; fi
+      - name: Prepare signing key
+        env:
+          KS_B64: ${{ secrets.KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+          K_ALIAS: ${{ secrets.KEY_ALIAS }}
+          K_PASS: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -n "$KS_B64" ]; then
+            echo "$KS_B64" | base64 -d > /tmp/release.jks
+            echo "KEYSTORE_FILE=/tmp/release.jks" >> "$GITHUB_ENV"
+            echo "KEYSTORE_PASSWORD=$KS_PASS" >> "$GITHUB_ENV"
+            echo "KEY_ALIAS=$K_ALIAS" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=$K_PASS" >> "$GITHUB_ENV"
+            echo "Using release signing key"
+          else
+            echo "No signing secrets found: APK will use the debug key"
+          fi
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -25,10 +64,22 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
-      - name: Build debug APK
+      - name: Build release APK
         working-directory: ${{ steps.p.outputs.dir }}
-        run: gradle assembleDebug --console=plain
+        run: gradle assembleRelease --console=plain
+      - name: Collect APK
+        id: apk
+        working-directory: ${{ steps.p.outputs.dir }}
+        run: |
+          NAME="NetScout-${APP_VERSION:-dev-$GITHUB_RUN_NUMBER}.apk"
+          cp app/build/outputs/apk/release/app-release.apk "/tmp/$NAME"
+          echo "path=/tmp/$NAME" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:
           name: NetScout-apk
-          path: ${{ steps.p.outputs.dir }}/app/build/outputs/apk/debug/*.apk
+          path: ${{ steps.apk.outputs.path }}
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.apk.outputs.path }}
